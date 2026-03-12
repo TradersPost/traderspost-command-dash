@@ -1,0 +1,34 @@
+@import 'tailwindcss';
+
+@theme {
+  /* TradersPost dark navy palette */
+  --color-bg-deep: #111927;
+  --color-bg-card: #1d2939;
+  --color-bg-elevated: #293548;
+  --color-border: #344054;
+  --color-text-primary: #f2f4f7;
+  --color-text-secondary: #98a2b3;
+  --color-text-dim: #667085;
+  --color-gex-positive: #2e90fa;
+  --color-gex-negative: #667085;
+  --color-call-wall: #f79009;
+  --color-put-wall: #f04438;
+  --color-accent: #2e90fa;
+  --color-spot-line: #53b1fd;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--color-bg-deep);
+  color: var(--color-text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  overflow: hidden;
+  user-select: none;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
