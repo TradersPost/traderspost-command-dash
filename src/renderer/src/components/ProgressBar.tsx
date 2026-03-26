@@ -61,6 +61,18 @@ export function ProgressBar({
     []
   )
 
+  const handleWheel = useCallback(
+    (e: React.WheelEvent) => {
+      if (snapshotCount <= 1) return
+      e.preventDefault()
+      const direction = (e.deltaY || e.deltaX) > 0 ? 1 : -1
+      const step = Math.max(1, Math.round(snapshotCount * 0.02))
+      const next = Math.max(0, Math.min(snapshotCount - 1, selectedIndex + direction * step))
+      onScrub(next)
+    },
+    [snapshotCount, selectedIndex, onScrub]
+  )
+
   const progress =
     snapshotCount > 1 ? selectedIndex / (snapshotCount - 1) : snapshotCount === 1 ? 1 : 0
 
@@ -91,7 +103,7 @@ export function ProgressBar({
       </div>
       {/* Scrubber */}
       <div className="flex items-center gap-3">
-        <span className="text-[11px] text-text-dim font-mono shrink-0">
+        <span className="text-[11px] text-text-dim font-mono shrink-0 w-[100px]">
           {activeTime ?? '--:--'}
         </span>
         <div
@@ -100,6 +112,7 @@ export function ProgressBar({
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
+          onWheel={handleWheel}
           style={{ touchAction: 'none' }}
         >
           {/* Track background */}

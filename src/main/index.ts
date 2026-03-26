@@ -5,6 +5,14 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { config } from 'dotenv'
 import { fetchSpotPrice, fetchAllContracts, fetchIntradayBars } from './api'
 import { calculateGammaNotional, type GammaNotionalData } from './gex-calc'
+import {
+  fetchPolymarketEvent,
+  fetchOutcomePrices,
+  fetchPriceHistory,
+  type PolymarketEventData,
+  type PriceHistoryPoint
+} from './polymarket-api'
+import { startSignalScheduler } from './signal-scheduler'
 
 interface HistorySnapshot {
   data: GammaNotionalData
@@ -15,6 +23,54 @@ interface HistorySnapshot {
 config({ path: join(app.getAppPath(), '.env') })
 // Also try CWD for dev
 config()
+
+// Webhook settings config (persisted to userData)
+export interface WebhookSettings {
+  webhookUrl: string
+  buyMessage: string
+  sellMessage: string
+  enabled: boolean
+  signalTime: string
+  threshold: number
+}
+
+const settingsPath = join(app.getPath('userData'), 'webhook-settings.json')
+
+function readWebhookSettings(): WebhookSettings {
+  const defaults: WebhookSettings = {
+    webhookUrl: process.env.TRADERSPOST_WEBHOOK_URL || '',
+    buyMessage: process.env.TRADERSPOST_WEBHOOK_BUY_MESSAGE || '{"action":"buy"}',
+    sellMessage: process.env.TRADERSPOST_WEBHOOK_SELL_MESSAGE || '{"action":"sell"}',
+    enabled: process.env.WEBHOOK_SIGNAL_ENABLED === 'true',
+    signalTime: process.env.WEBHOOK_SIGNAL_TIME || '09:30',
+    threshold: parseFloat(process.env.WEBHOOK_SIGNAL_THRESHOLD || '0.10')
+  }
+
+  if (existsSync(settingsPath)) {
+    try {
+      const saved = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+      return { ...defaults, ...saved }
+    } catch {
+      /* ignore */
+    }
+  }
+  return defaults
+}
+
+function writeWebhookSettings(settings: WebhookSettings): void {
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2))
+  // Also update process.env so the signal scheduler picks up changes
+  process.env.TRADERSPOST_WEBHOOK_URL = settings.webhookUrl
+  process.env.TRADERSPOST_WEBHOOK_BUY_MESSAGE = settings.buyMessage
+  process.env.TRADERSPOST_WEBHOOK_SELL_MESSAGE = settings.sellMessage
+  process.env.WEBHOOK_SIGNAL_ENABLED = settings.enabled ? 'true' : 'false'
+  process.env.WEBHOOK_SIGNAL_TIME = settings.signalTime
+  process.env.WEBHOOK_SIGNAL_THRESHOLD = String(settings.threshold)
+}
+
+// Apply saved settings to process.env on startup
+const savedSettings = readWebhookSettings()
+writeWebhookSettings(savedSettings)
 
 // Local disk cache for GEX snapshots
 const cacheDir = join(app.getPath('userData'), 'gex-cache')
@@ -155,6 +211,91 @@ function createWindow(): void {
   }
 }
 
+// Polymarket data cache
+let polyCache: { data: PolymarketEventData; fetchedAt: number } | null = null
+const POLY_CACHE_TTL = 30 * 1000 // 30 seconds
+
+function createPolymarketWindow(): void {
+  const polyWindow = new BrowserWindow({
+    width: 420,
+    height: 520,
+    x: 460,
+    frame: false,
+    alwaysOnTop: true,
+    resizable: true,
+    minWidth: 360,
+    minHeight: 400,
+    backgroundColor: '#111927',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false
+    }
+  })
+
+  polyWindow.on('ready-to-show', () => {
+    polyWindow.show()
+  })
+
+  ipcMain.handle('fetch-polymarket-event', async (_event, slug: string) => {
+    // Return cached data if fresh and same slug
+    if (polyCache && Date.now() - polyCache.fetchedAt < POLY_CACHE_TTL && polyCache.data.slug === slug) {
+      return polyCache.data
+    }
+
+    const data = await fetchPolymarketEvent(slug)
+
+    // Refresh live prices from CLOB API for active outcomes
+    const activeTokenIds = data.outcomes
+      .filter((o) => !o.closed)
+      .map((o) => o.clobTokenId)
+      .filter(Boolean)
+
+    if (activeTokenIds.length > 0) {
+      const prices = await fetchOutcomePrices(activeTokenIds)
+      for (const outcome of data.outcomes) {
+        const mid = prices.get(outcome.clobTokenId)
+        if (mid !== undefined) {
+          outcome.probability = mid
+        }
+      }
+    }
+
+    polyCache = { data, fetchedAt: Date.now() }
+    return data
+  })
+
+  ipcMain.handle(
+    'fetch-price-history',
+    async (_event, tokenId: string, interval?: string, fidelity?: number) => {
+      return fetchPriceHistory(tokenId, interval || 'max', fidelity || 60)
+    }
+  )
+
+  ipcMain.handle('get-webhook-settings', () => {
+    return readWebhookSettings()
+  })
+
+  ipcMain.handle('save-webhook-settings', (_event, settings: WebhookSettings) => {
+    writeWebhookSettings(settings)
+    console.log(`[Signal] Settings updated — enabled: ${settings.enabled}, time: ${settings.signalTime}`)
+  })
+
+  ipcMain.handle('polymarket-window-minimize', () => {
+    polyWindow.minimize()
+  })
+
+  ipcMain.handle('polymarket-window-close', () => {
+    polyWindow.close()
+  })
+
+  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+    polyWindow.loadURL(process.env['ELECTRON_RENDERER_URL'] + '/polymarket.html')
+  } else {
+    polyWindow.loadFile(join(__dirname, '../renderer/polymarket.html'))
+  }
+}
+
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.traderspost.command-dash')
 
@@ -163,9 +304,14 @@ app.whenReady().then(() => {
   })
 
   createWindow()
+  createPolymarketWindow()
+  startSignalScheduler()
 
   app.on('activate', function () {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow()
+      createPolymarketWindow()
+    }
   })
 })
 
